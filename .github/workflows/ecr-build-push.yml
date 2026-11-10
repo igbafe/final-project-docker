@@ -3,11 +3,11 @@ name: Build and Push Images to ECR
 on:
   push:
     branches: [main]
-    paths: ['src/**', 'pb/**', '.env', '.github/workflows/ecr-build-push.yml']
+    paths: ["src/**", "pb/**", ".env", ".github/workflows/ecr-build-push.yml"]
   workflow_dispatch: {}
 
 permissions:
-  id-token: write 
+  id-token: write
   contents: read
 
 concurrency: ecr-build-push
@@ -20,11 +20,9 @@ jobs:
       list: ${{ steps.list.outputs.list }}
     steps:
       - id: list
-        run: echo 'list=["chatbot"]' >> "$GITHUB_OUTPUT"
-        All: ["accounting","ad","agent","cart","chatbot","checkout","currency","email",
-              "flagd-ui","fraud-detection","frontend","frontend-proxy","image-provider",
-              "kafka","load-generator","mcp","opamp-server","opensearch","payment",
-              "product-catalog","quote","recommendation","shipping","telemetry-docs"]
+        run: echo 'list=["accounting","ad","agent","cart","chatbot","checkout","currency","email","flagd-ui","fraud-detection","frontend","frontend-proxy","image-provider","kafka","load-generator","mcp","opamp-server","opensearch","payment","product-catalog","quote","recommendation","shipping","telemetry-docs"]' >> "$GITHUB_OUTPUT"
+        # Later runs: only what you changed. Comment out the line above and use this one:
+        # echo 'list=["chatbot"]' >> "$GITHUB_OUTPUT"
 
   build-and-push:
     name: Build ${{ matrix.service }}
@@ -49,7 +47,7 @@ jobs:
 
       - name: who ami
         run: |
-           whoami
+          whoami
 
       - name: Log in to ECR (our images)
         id: ecr
@@ -62,7 +60,7 @@ jobs:
 
       - name: Create the ECR repository if it doesn't exist
         run: aws ecr describe-repositories --repository-names "$IMAGE" ||
-             aws ecr create-repository --repository-name "$IMAGE" --image-scanning-configuration scanOnPush=true
+          aws ecr create-repository --repository-name "$IMAGE" --image-scanning-configuration scanOnPush=true
 
       - name: Read version pins from .env
         run: grep -E '^(OTEL_JAVA_AGENT_VERSION|OPENTELEMETRY_CPP_VERSION|OPAMP_GO_REF)=' .env >> "$GITHUB_ENV"
@@ -98,25 +96,28 @@ jobs:
             ${{ steps.ecr.outputs.registry }}/${{ env.IMAGE }}:latest
 
   # ---- 2. Point the k8s-file repo at the new images; Argo CD deploys them ----
-  # update-k8s-manifests:
-  #   needs: [services, build-and-push] # runs only if every image built
-  #   runs-on: self-hosted
-  #   steps:
-  #     - uses: actions/checkout@v7
-  #       with:
-  #         repository: digitalwitchdemo/k8s-file
-  #         token: ${{ secrets.K8S_REPO_TOKEN }}
+  update-k8s-manifests:
+    needs: [services, build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: igbafe/k8s-files
+          ref: main
+          token: ${{ secrets.K8S_REPO_TOKEN }}
 
-  #     - name: Set the new image tag and push
-  #       env:
-  #         SERVICES: ${{ join(fromJSON(needs.services.outputs.list), ' ') }}
-  #       run: |
-  #         TAG="$GITHUB_RUN_NUMBER" # same tag the build job pushed
-  #         # Only the images built in this run: the newTag line under each "ecomerce/<service>"
-  #         for svc in $SERVICES; do
-  #           sed -i -E "/ecomerce\/$svc\$/{n;s|(newTag: ).*|\1\"$TAG\"|}" */kustomization.yaml
-  #         done
-  #         git config user.name "github-actions[bot]"
-  #         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-  #         git commit -am "Deploy images from build #$TAG" -m "Commit: $GITHUB_SHA" || exit 0 # nothing changed
-  #         git push
+      - name: Point manifests at our ECR, set new tags, push
+        env:
+          SERVICES: ${{ join(fromJSON(needs.services.outputs.list), ' ') }}
+          REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+        run: |
+          TAG="$GITHUB_RUN_NUMBER"
+          grep -rlE '[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com' . --include='*.yaml' --exclude-dir=.git \
+            | xargs -r sed -i -E "s#[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com#${REGISTRY}#g"
+          for svc in $SERVICES; do
+            sed -i -E "/ecomerce\/$svc\$/{n;s|(newTag: ).*|\1\"$TAG\"|}" */kustomization.yaml
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Deploy images from build #$TAG" -m "Commit: $GITHUB_SHA" || exit 0
+          git push
