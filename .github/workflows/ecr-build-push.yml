@@ -14,110 +14,132 @@ concurrency: ecr-build-push
 
 jobs:
   # ---- 0. The services to build: edit this one list ----
-  services:
-    runs-on: ubuntu-latest
-    outputs:
-      list: ${{ steps.list.outputs.list }}
-    steps:
-      - id: list
-        run: echo 'list=["accounting","ad","agent","cart","chatbot","checkout","currency","email","flagd-ui","fraud-detection","frontend","frontend-proxy","image-provider","kafka","load-generator","mcp","opamp-server","opensearch","payment","product-catalog","quote","recommendation","shipping","telemetry-docs"]' >> "$GITHUB_OUTPUT"
-        # Later runs: only what you changed. Comment out the line above and use this one:
-        # echo 'list=["chatbot"]' >> "$GITHUB_OUTPUT"
 
-  build-and-push:
-    name: Build ${{ matrix.service }}
-    needs: services
+  # services:
+  #   runs-on: ubuntu-latest
+  #   outputs:
+  #     list: ${{ steps.list.outputs.list }}
+  #   steps:
+  #     - id: list
+  #       run: echo 'list=["accounting","ad","agent","cart","chatbot","checkout","currency","email","flagd-ui","fraud-detection","frontend","frontend-proxy","image-provider","kafka","load-generator","mcp","opamp-server","opensearch","payment","product-catalog","quote","recommendation","shipping","telemetry-docs"]' >> "$GITHUB_OUTPUT"
+  #       # Later runs: only what you changed. Comment out the line above and use this one:
+  #       # echo 'list=["chatbot"]' >> "$GITHUB_OUTPUT"
+
+  # build-and-push:
+  #   name: Build ${{ matrix.service }}
+  #   needs: services
+  #   runs-on: ubuntu-latest
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       service: ${{ fromJSON(needs.services.outputs.list) }}
+  #   env:
+  #     IMAGE: ecomerce/${{ matrix.service }} # ECR repository name
+  #     # Every Dockerfile is at src/<service>/Dockerfile, except cart's
+  #     DOCKERFILE: ${{ matrix.service == 'cart' && 'src/cart/src/Dockerfile' || format('src/{0}/Dockerfile', matrix.service) }}
+  #   steps:
+  #     - uses: actions/checkout@v7
+
+  #     - name: Log in to AWS
+  #       uses: aws-actions/configure-aws-credentials@v6
+  #       with:
+  #         role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+  #         aws-region: ${{ vars.AWS_REGION }}
+
+  #     - name: who ami
+  #       run: |
+  #         whoami
+
+  #     - name: Log in to ECR (our images)
+  #       id: ecr
+  #       uses: aws-actions/amazon-ecr-login@v2
+
+  #     - name: Log in to ECR Public (base images, avoids rate limits)
+  #       uses: aws-actions/amazon-ecr-login@v2
+  #       with:
+  #         registry-type: public
+
+  #     - name: Create the ECR repository if it doesn't exist
+  #       run: aws ecr describe-repositories --repository-names "$IMAGE" ||
+  #         aws ecr create-repository --repository-name "$IMAGE" --image-scanning-configuration scanOnPush=true
+
+  #     - name: Read version pins from .env
+  #       run: grep -E '^(OTEL_JAVA_AGENT_VERSION|OPENTELEMETRY_CPP_VERSION|OPAMP_GO_REF)=' .env >> "$GITHUB_ENV"
+
+  #     # Self-hosted runner: free disk space left over from earlier builds
+  #     # (layers are still reused from the GitHub Actions cache)
+  #     - name: Free disk space
+  #       run: |
+  #         df -h / | tail -1
+  #         docker builder prune -af || true
+  #         docker image prune -af || true
+  #         df -h / | tail -1
+
+  #     - uses: docker/setup-buildx-action@v4
+
+  #     - name: Build and push
+  #       uses: docker/build-push-action@v7
+  #       with:
+  #         context: .
+  #         file: ${{ env.DOCKERFILE }}
+  #         platforms: linux/amd64 # EKS nodes are amd64; arm64 builds ran under slow emulation
+  #         # Reuse unchanged layers from earlier runs (one cache per service)
+  #         cache-from: type=gha,scope=${{ matrix.service }}
+  #         cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+  #         push: true
+  #         # Version pins; services that don't use one ignore it
+  #         build-args: |
+  #           OTEL_JAVA_AGENT_VERSION=${{ env.OTEL_JAVA_AGENT_VERSION }}
+  #           OPENTELEMETRY_CPP_VERSION=${{ env.OPENTELEMETRY_CPP_VERSION }}
+  #           OPAMP_GO_REF=${{ env.OPAMP_GO_REF }}
+  #         tags: |
+  #           ${{ steps.ecr.outputs.registry }}/${{ env.IMAGE }}:${{ github.run_number }}
+  #           ${{ steps.ecr.outputs.registry }}/${{ env.IMAGE }}:latest
+
+  # ---- 2. Point the k8s-file repo at the new images; Argo CD deploys them ----
+  # update-k8s-manifests:
+  #   needs: [services, build-and-push]
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v7
+  #       with:
+  #         repository: igbafe/k8s-files
+  #         ref: main
+  #         token: ${{ secrets.K8S_REPO_TOKEN }}
+
+  #     - name: Point manifests at our ECR, set new tags, push
+  #       env:
+  #         SERVICES: ${{ join(fromJSON(needs.services.outputs.list), ' ') }}
+  #         REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+  #       run: |
+  #         TAG="$GITHUB_RUN_NUMBER"
+  #         grep -rlE '[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com' . --include='*.yaml' --exclude-dir=.git \
+  #           | xargs -r sed -i -E "s#[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com#${REGISTRY}#g"
+  #         for svc in $SERVICES; do
+  #           sed -i -E "/ecomerce\/$svc\$/{n;s|(newTag: ).*|\1\"$TAG\"|}" */kustomization.yaml
+  #         done
+  #         git config user.name "github-actions[bot]"
+  #         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+  #         git commit -am "Deploy images from build #$TAG" -m "Commit: $GITHUB_SHA" || exit 0
+  #         git push
+  oidc-check:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        service: ${{ fromJSON(needs.services.outputs.list) }}
-    env:
-      IMAGE: ecomerce/${{ matrix.service }} # ECR repository name
-      # Every Dockerfile is at src/<service>/Dockerfile, except cart's
-      DOCKERFILE: ${{ matrix.service == 'cart' && 'src/cart/src/Dockerfile' || format('src/{0}/Dockerfile', matrix.service) }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Show the claims GitHub sends
+        run: |
+          TOKEN=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "::add-mask::$TOKEN"
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#PAYLOAD} % 4 )) -ne 0 ]; do PAYLOAD="${PAYLOAD}="; done
+          echo "$PAYLOAD" | base64 -d | jq '{sub, aud, iss, repository, repository_id, repository_owner_id}'
 
       - name: Log in to AWS
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
+          retry-max-attempts: 1 # fail fast instead of 12 retries
 
-      - name: who ami
-        run: |
-          whoami
-
-      - name: Log in to ECR (our images)
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Log in to ECR Public (base images, avoids rate limits)
-        uses: aws-actions/amazon-ecr-login@v2
-        with:
-          registry-type: public
-
-      - name: Create the ECR repository if it doesn't exist
-        run: aws ecr describe-repositories --repository-names "$IMAGE" ||
-          aws ecr create-repository --repository-name "$IMAGE" --image-scanning-configuration scanOnPush=true
-
-      - name: Read version pins from .env
-        run: grep -E '^(OTEL_JAVA_AGENT_VERSION|OPENTELEMETRY_CPP_VERSION|OPAMP_GO_REF)=' .env >> "$GITHUB_ENV"
-
-      # Self-hosted runner: free disk space left over from earlier builds
-      # (layers are still reused from the GitHub Actions cache)
-      - name: Free disk space
-        run: |
-          df -h / | tail -1
-          docker builder prune -af || true
-          docker image prune -af || true
-          df -h / | tail -1
-
-      - uses: docker/setup-buildx-action@v4
-
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ${{ env.DOCKERFILE }}
-          platforms: linux/amd64 # EKS nodes are amd64; arm64 builds ran under slow emulation
-          # Reuse unchanged layers from earlier runs (one cache per service)
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
-          push: true
-          # Version pins; services that don't use one ignore it
-          build-args: |
-            OTEL_JAVA_AGENT_VERSION=${{ env.OTEL_JAVA_AGENT_VERSION }}
-            OPENTELEMETRY_CPP_VERSION=${{ env.OPENTELEMETRY_CPP_VERSION }}
-            OPAMP_GO_REF=${{ env.OPAMP_GO_REF }}
-          tags: |
-            ${{ steps.ecr.outputs.registry }}/${{ env.IMAGE }}:${{ github.run_number }}
-            ${{ steps.ecr.outputs.registry }}/${{ env.IMAGE }}:latest
-
-  # ---- 2. Point the k8s-file repo at the new images; Argo CD deploys them ----
-  update-k8s-manifests:
-    needs: [services, build-and-push]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          repository: igbafe/k8s-files
-          ref: main
-          token: ${{ secrets.K8S_REPO_TOKEN }}
-
-      - name: Point manifests at our ECR, set new tags, push
-        env:
-          SERVICES: ${{ join(fromJSON(needs.services.outputs.list), ' ') }}
-          REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
-        run: |
-          TAG="$GITHUB_RUN_NUMBER"
-          grep -rlE '[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com' . --include='*.yaml' --exclude-dir=.git \
-            | xargs -r sed -i -E "s#[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com#${REGISTRY}#g"
-          for svc in $SERVICES; do
-            sed -i -E "/ecomerce\/$svc\$/{n;s|(newTag: ).*|\1\"$TAG\"|}" */kustomization.yaml
-          done
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "Deploy images from build #$TAG" -m "Commit: $GITHUB_SHA" || exit 0
-          git push
+      - name: Who am I in AWS
+        run: aws sts get-caller-identity
